@@ -81,6 +81,7 @@ spec:
               apiKeySecretRef:
                 key: token
                 name: desec-token
+              ttl: 1800 # Optional, defaults to 3600
             groupName: acme.pr0ton11.github.com
             solverName: desec
 ```

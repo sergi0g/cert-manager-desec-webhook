@@ -20,11 +20,20 @@ import (
 
 const txtRecordType = "TXT"
 
+// We'll be passing this around to functions instead of the client directly so we can also include the TTL
+type Context struct {
+	// Reference to the deSEC client
+	apiClient *desec.Client
+	// The TTL value to use for the records created
+	ttl int
+}
+
 // Configuration for the DeSEC DNS-01 challenge solver
 type DeSECDNSProviderSolverConfig struct {
 	// Reference to the kubernetes secret containing the API token for deSEC
 	APIKeySecretRef v1.SecretKeySelector `json:"apiKeySecretRef"`
 	// A global namespace (e.g APIKeySecretRefNamespace is not required, because ClusterIssuer provides the cert-manager namespace as default value for global issuers)
+	TTL int `json:"ttl"`
 }
 
 // A DNS-01 challenge solver for the DeSEC DNS Provider
@@ -39,13 +48,15 @@ func (s *DeSECDNSProviderSolver) Name() string {
 }
 
 // Initializes a new client
-func (s *DeSECDNSProviderSolver) getClient(config *apiextensionsv1.JSON, namespace string) (*desec.Client, error) {
+func (s *DeSECDNSProviderSolver) getContext(config *apiextensionsv1.JSON, namespace string) (*Context, error) {
 	// Check if configuration is empty or was not parsed
 	if config == nil {
 		return nil, fmt.Errorf("missing configuration in issuer found; webhook configuration requires apiKeySecretRef containing deSEC API token")
 	}
 	// Initialize the configuration object and unmarshal json
-	solverConfig := DeSECDNSProviderSolverConfig{}
+	solverConfig := DeSECDNSProviderSolverConfig{
+		TTL: 3600,
+	}
 	if err := json.Unmarshal(config.Raw, &solverConfig); err != nil {
 		return nil, fmt.Errorf("invalid configuration in issuer found; webhook configuration requires apiKeySecretRef containing deSEC API token")
 	}
@@ -67,14 +78,19 @@ func (s *DeSECDNSProviderSolver) getClient(config *apiextensionsv1.JSON, namespa
 	client := desec.New(string(token), desec.NewDefaultClientOptions())
 	klog.InfoS("deSEC client configured", "component", "desec-solver", "event", "client_ready", "namespace", namespace, "secretName", solverConfig.APIKeySecretRef.Name, "secretKey", solverConfig.APIKeySecretRef.Key)
 
+	context := &Context{
+		apiClient: client,
+		ttl:       solverConfig.TTL,
+	}
+
 	// Return the client (reuse if initialized)
-	return client, nil
+	return context, nil
 }
 
 // Present presents the TXT DNS entry after completion of the ACME DNS-01 challenge
 func (s *DeSECDNSProviderSolver) Present(req *acme.ChallengeRequest) error {
 	// Create or reuse the API client
-	apiClient, err := s.getClient(req.Config, req.ResourceNamespace)
+	ctx, err := s.getContext(req.Config, req.ResourceNamespace)
 	if err != nil {
 		return err
 	}
@@ -83,7 +99,7 @@ func (s *DeSECDNSProviderSolver) Present(req *acme.ChallengeRequest) error {
 	// Cut the zone from the fqdn to retrieve the subdomain
 	subdomain := util.UnFqdn(strings.Replace(fqdn, zone, "", 1))
 	// Check if zone is managed in deSEC
-	domain, err := apiClient.Domains.Get(context.Background(), zone)
+	domain, err := ctx.apiClient.Domains.Get(context.Background(), zone)
 	if err != nil {
 		return fmt.Errorf("domain %s could not be retrieved from deSEC API: %w", zone, err)
 	}
@@ -92,10 +108,10 @@ func (s *DeSECDNSProviderSolver) Present(req *acme.ChallengeRequest) error {
 		SubName: subdomain,
 		Records: []string{fmt.Sprintf("\"%s\"", req.Key)},
 		Type:    txtRecordType,
-		TTL:     3600,
+		TTL:     ctx.ttl,
 	}
 
-	if err := upsertTXTRecord(context.Background(), apiClient, recordSet); err != nil {
+	if err := upsertTXTRecord(context.Background(), ctx.apiClient, recordSet); err != nil {
 		return fmt.Errorf("DNS record %s presentation failed: %w", fqdn, err)
 	}
 	klog.InfoS("DNS record presented", "component", "desec-solver", "event", "record_presented", "namespace", req.ResourceNamespace, "zone", zone, "fqdn", fqdn, "subdomain", subdomain, "ttl", recordSet.TTL)
@@ -106,7 +122,7 @@ func (s *DeSECDNSProviderSolver) Present(req *acme.ChallengeRequest) error {
 // Cleanup removes the TXT DNS entry after completion of the ACME DNS-01 challenge
 func (s *DeSECDNSProviderSolver) CleanUp(req *acme.ChallengeRequest) error {
 	// Create or reuse the API client
-	apiClient, err := s.getClient(req.Config, req.ResourceNamespace)
+	ctx, err := s.getContext(req.Config, req.ResourceNamespace)
 	if err != nil {
 		return err
 	}
@@ -115,12 +131,12 @@ func (s *DeSECDNSProviderSolver) CleanUp(req *acme.ChallengeRequest) error {
 	// Cut the zone from the fqdn to retrieve the subdomain
 	subdomain := util.UnFqdn(strings.Replace(fqdn, zone, "", 1))
 	// Check if zone is managed in deSEC
-	domain, err := apiClient.Domains.Get(context.Background(), zone)
+	domain, err := ctx.apiClient.Domains.Get(context.Background(), zone)
 	if err != nil {
 		return fmt.Errorf("domain %s could not be retrieved from deSEC API: %w", zone, err)
 	}
 	record := fmt.Sprintf("\"%s\"", req.Key)
-	if err := removeTXTRecord(context.Background(), apiClient, domain.Name, subdomain, record); err != nil {
+	if err := removeTXTRecord(context.Background(), ctx.apiClient, domain.Name, subdomain, record); err != nil {
 		return fmt.Errorf("DNS record %s cleanup failed: %w", fqdn, err)
 	}
 	klog.InfoS("DNS record cleaned up", "component", "desec-solver", "event", "record_deleted", "namespace", req.ResourceNamespace, "zone", zone, "fqdn", fqdn, "subdomain", subdomain)
