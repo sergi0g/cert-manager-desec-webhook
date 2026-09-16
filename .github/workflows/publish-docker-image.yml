@@ -27,7 +27,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ghcr.io/pr0ton11/cert-manager-desec-webhook
+            ghcr.io/sergi0g/cert-manager-desec-webhook
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
           labels: |
